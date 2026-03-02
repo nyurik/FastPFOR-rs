@@ -2,6 +2,7 @@
 
 main_crate := 'fastpfor'
 features_flag := '--all-features'
+just := just_executable()
 
 # if running in CI, treat warnings as errors by setting RUSTFLAGS and RUSTDOCFLAGS to '-D warnings' unless they are already set
 # Use `CI=true just ci-test` to run the same tests as in GitHub CI.
@@ -36,7 +37,7 @@ ci-coverage: env-info && \
     mkdir -p target/llvm-cov
 
 # Run all tests as expected by CI
-ci-test: env-info test-fmt build clippy test test-doc && assert-git-is-clean
+ci-test: ci-env-info test-fmt build clippy test test-doc && assert-git-is-clean
 
 # Run minimal subset of tests to ensure compatibility with MSRV
 ci-test-msrv: env-info test
@@ -69,6 +70,28 @@ env-info:
     @echo "RUSTFLAGS='$RUSTFLAGS'"
     @echo "RUSTDOCFLAGS='$RUSTDOCFLAGS'"
     @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
+
+# Print detailed CI environment info including CPU details (Linux-only)
+ci-env-info:
+    @echo "::group::General environment Information"
+    @echo "Running for '{{main_crate}}' crate {{if ci_mode == '1' {'in CI mode'} else {'in dev mode'} }} on {{os()}} / {{arch()}}"
+    @echo "PWD {{justfile_directory()}}"
+    {{just}} --version
+    rustc --version
+    cargo --version
+    rustup --version
+    @echo "RUSTFLAGS='$RUSTFLAGS'"
+    @echo "RUSTDOCFLAGS='$RUSTDOCFLAGS'"
+    @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
+    @echo "::endgroup::"
+
+    @echo "::group::lscpu"
+    lscpu
+    @echo "::endgroup::"
+
+    @echo "::group::/proc/cpuinfo"
+    cat /proc/cpuinfo
+    @echo "::endgroup::"
 
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:
