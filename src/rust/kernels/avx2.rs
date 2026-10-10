@@ -9,7 +9,7 @@ use bytemuck::cast;
 pub use token::Avx2;
 
 use crate::FastPForResult;
-use crate::rust::integer_compression::fastpfor::FastPForBlock;
+use crate::rust::integer_compression::fastpfor::{FastPForBlock, Output};
 use crate::rust::integer_compression::fastpfor_int::FastPForInt;
 use crate::rust::kernels::lanes::{decode_page_lanes, encode_page_lanes};
 use crate::rust::kernels::lanes_wide::Wide;
@@ -75,11 +75,11 @@ impl private::PageCodec for Auto {
         }
     }
 
-    fn decode_sequential<L: Layout, T: FastPForInt, const N: usize>(
+    fn decode_sequential<L: Layout, T: FastPForInt, const N: usize, O: Output<T> + ?Sized>(
         codec: &mut FastPForBlock<L, T, N, Self>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()> {
@@ -116,15 +116,15 @@ impl private::PageCodec for Auto {
         );
     }
 
-    fn decode_interleaved<L: Layout, T: FastPForInt, const N: usize>(
+    fn decode_interleaved<L: Layout, T: FastPForInt, const N: usize, O: Output<T> + ?Sized>(
         codec: &mut FastPForBlock<L, T, N, Self>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()> {
-        decode_page_lanes::<L, T, N, Self, Wide>(
+        decode_page_lanes::<L, T, N, Self, Wide, O>(
             codec,
             input,
             input_offset,
@@ -147,12 +147,12 @@ pub trait Avx2Int: Sized {
     ) where
         Self: FastPForInt;
 
-    fn decode_page_avx2<L: Layout, const N: usize>(
+    fn decode_page_avx2<L: Layout, const N: usize, O: Output<Self> + ?Sized>(
         token: Avx2,
         codec: &mut FastPForBlock<L, Self, N, Auto>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<Self>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()>
@@ -179,12 +179,12 @@ impl Avx2Int for u32 {
     }
 
     #[inline]
-    fn decode_page_avx2<L: Layout, const N: usize>(
+    fn decode_page_avx2<L: Layout, const N: usize, O: Output<Self> + ?Sized>(
         _token: Avx2,
         codec: &mut FastPForBlock<L, Self, N, Auto>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<Self>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()> {
@@ -215,12 +215,12 @@ impl Avx2Int for u64 {
     }
 
     #[inline]
-    fn decode_page_avx2<L: Layout, const N: usize>(
+    fn decode_page_avx2<L: Layout, const N: usize, O: Output<Self> + ?Sized>(
         _token: Avx2,
         codec: &mut FastPForBlock<L, Self, N, Auto>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<Self>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()> {
@@ -335,11 +335,11 @@ fn encode_page_u32<L: Layout, const N: usize>(
 }
 
 #[target_feature(enable = "avx2")]
-fn decode_page_u32<L: Layout, const N: usize>(
+fn decode_page_u32<L: Layout, const N: usize, O: Output<u32> + ?Sized>(
     codec: &mut FastPForBlock<L, u32, N, Auto>,
     input: &[u32],
     input_offset: &mut Cursor<u32>,
-    output: &mut Vec<u32>,
+    output: &mut O,
     output_offset: &mut Cursor<u32>,
     this_size: u32,
 ) -> FastPForResult<()> {
@@ -375,11 +375,11 @@ fn encode_page_u64<L: Layout, const N: usize>(
 }
 
 #[target_feature(enable = "avx2")]
-fn decode_page_u64<L: Layout, const N: usize>(
+fn decode_page_u64<L: Layout, const N: usize, O: Output<u64> + ?Sized>(
     codec: &mut FastPForBlock<L, u64, N, Auto>,
     input: &[u32],
     input_offset: &mut Cursor<u32>,
-    output: &mut Vec<u64>,
+    output: &mut O,
     output_offset: &mut Cursor<u32>,
     this_size: u32,
 ) -> FastPForResult<()> {

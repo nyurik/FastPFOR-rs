@@ -50,6 +50,40 @@ fn grow_to<E: Copy>(output: &mut Vec<E>, len: usize, zero: E) {
     }
 }
 
+/// Where a page decoder writes its values: a `Vec` that it grows as it goes, or a caller's slice that
+/// must already be long enough. Each decoder is compiled once per kind, so neither pays for the other.
+pub trait Output<E: Copy> {
+    /// Makes the first `len` elements writable and returns the whole buffer: grows a `Vec` with
+    /// [`grow_to`], or checks that a slice is long enough.
+    fn make_room(&mut self, len: usize, zero: E) -> FastPForResult<&mut [E]>;
+    /// Drops the zeros a `Vec` got past `len`; a slice is left as it is.
+    fn finish(&mut self, len: usize);
+}
+
+impl<E: Copy> Output<E> for Vec<E> {
+    #[inline]
+    fn make_room(&mut self, len: usize, zero: E) -> FastPForResult<&mut [E]> {
+        grow_to(self, len, zero);
+        Ok(self)
+    }
+    #[inline]
+    fn finish(&mut self, len: usize) {
+        self.truncate(len);
+    }
+}
+
+impl<E: Copy> Output<E> for [E] {
+    #[inline]
+    fn make_room(&mut self, len: usize, _zero: E) -> FastPForResult<&mut [E]> {
+        if self.len() < len {
+            return Err(FastPForError::OutputBufferTooSmall);
+        }
+        Ok(self)
+    }
+    #[inline]
+    fn finish(&mut self, _len: usize) {}
+}
+
 pub(crate) trait PackFn<T>: Fn(&[T], usize, &mut [u32], usize, u8) + Copy {}
 impl<T, F: Fn(&[T], usize, &mut [u32], usize, u8) + Copy> PackFn<T> for F {}
 
@@ -152,12 +186,12 @@ impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, 
         }
     }
 
-    pub(crate) fn decode_headless_blocks(
+    pub(crate) fn decode_headless_blocks<O: Output<T> + ?Sized>(
         &mut self,
         input: &[u32],
         inlength: u32,
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
     ) -> FastPForResult<()> {
         let mynvalue = greatest_multiple(inlength, N as u32);
@@ -471,16 +505,16 @@ impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, 
         reason = "the kernel must inline into the page, including inside #[target_feature] callers"
     )]
     #[inline(always)]
-    pub(crate) fn decode_page_with(
+    pub(crate) fn decode_page_with<O: Output<T> + ?Sized>(
         &mut self,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
         unpack: impl UnpackFn<T>,
     ) -> FastPForResult<()> {
-        self.decode_page_layout::<false>(
+        self.decode_page_layout::<false, O>(
             input,
             input_offset,
             output,
@@ -499,17 +533,17 @@ impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, 
     )]
     #[expect(clippy::too_many_arguments, reason = "the page state plus two kernels")]
     #[inline(always)]
-    pub(crate) fn decode_page_interleaved_with(
+    pub(crate) fn decode_page_interleaved_with<O: Output<T> + ?Sized>(
         &mut self,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
         unpack: impl UnpackFn<T>,
         unpack_group: impl UnpackFn<T>,
     ) -> FastPForResult<()> {
-        self.decode_page_layout::<true>(
+        self.decode_page_layout::<true, O>(
             input,
             input_offset,
             output,
@@ -528,11 +562,11 @@ impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, 
         reason = "the kernel must inline into the page, including inside #[target_feature] callers"
     )]
     #[inline(always)]
-    fn decode_page_layout<const INTERLEAVED: bool>(
+    fn decode_page_layout<const INTERLEAVED: bool, O: Output<T> + ?Sized>(
         &mut self,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
         unpack: impl UnpackFn<T>,
@@ -673,8 +707,8 @@ impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, 
             byte_pos += 1;
 
             let block_start = tmp_output_offset as usize;
-            grow_to(output, block_start + N, T::zero());
-            let block: &mut [T; N] = (&mut output[block_start..block_start + N])
+            let out = output.make_room(block_start + N, T::zero())?;
+            let block: &mut [T; N] = (&mut out[block_start..block_start + N])
                 .try_into()
                 .expect("N-value block");
             let (group, words_per_group) = if INTERLEAVED {
@@ -743,7 +777,7 @@ impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, 
             tmp_output_offset += N as u32;
         }
         // Drop the zeros `grow_to` added past the last block.
-        output.truncate(tmp_output_offset as usize);
+        output.finish(tmp_output_offset as usize);
         output_offset.set_position(u64::from(tmp_output_offset));
         input_offset.set_position(u64::from(inexcept));
         Ok(())

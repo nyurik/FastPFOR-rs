@@ -20,7 +20,7 @@
 use std::io::Cursor;
 
 use crate::FastPForResult;
-use crate::rust::integer_compression::fastpfor::FastPForBlock;
+use crate::rust::integer_compression::fastpfor::{FastPForBlock, Output};
 use crate::rust::integer_compression::fastpfor_int::FastPForInt;
 use crate::rust::kernels::{Kernels, Layout};
 
@@ -334,11 +334,12 @@ pub(super) fn decode_page_lanes<
     const N: usize,
     K: Kernels,
     B: Backend,
+    O: Output<T> + ?Sized,
 >(
     codec: &mut FastPForBlock<L, T, N, K>,
     input: &[u32],
     input_offset: &mut Cursor<u32>,
-    output: &mut Vec<T>,
+    output: &mut O,
     output_offset: &mut Cursor<u32>,
     this_size: u32,
 ) -> FastPForResult<()> {

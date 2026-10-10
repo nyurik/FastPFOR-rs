@@ -25,6 +25,8 @@ where
     VariableByte<T>: AnyLenCodec<Elem = T>,
 {
     inner: CompositeCodec<FastPForBlock<L, T, N, K>, VariableByte<T>>,
+    /// Scratch space for the variable-byte tail in [`decode_into`](Self::decode_into).
+    tail: Vec<T>,
 }
 
 // Hand-written (not derived) so `default()` needs no `T: Default` bound;
@@ -37,7 +39,50 @@ where
     fn default() -> Self {
         Self {
             inner: CompositeCodec::default(),
+            tail: Vec::new(),
         }
+    }
+}
+
+impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForCodec<L, T, N, K>
+where
+    [T; N]: sealed::BlockSize,
+    VariableByte<T>: AnyLenCodec<Elem = T>,
+{
+    /// Decodes `input` into the start of `out`, and returns the number of values written.
+    ///
+    /// Unlike [`decode`](AnyLenCodec::decode), which appends to a `Vec` and so must initialize the space
+    /// first, this writes into memory the caller already owns: reusing `out` across calls saves that
+    /// zero-filling, about a third of the decoding time. Fails with
+    /// [`OutputBufferTooSmall`](crate::FastPForError::OutputBufferTooSmall) if `out` cannot hold every value;
+    /// what it holds then is unspecified.
+    ///
+    /// ```
+    /// # use fastpfor::{AnyLenCodec, FastPForSequential32x128};
+    /// let data: Vec<u32> = (0..1000).collect();
+    /// let mut codec = FastPForSequential32x128::default();
+    /// let mut encoded = Vec::new();
+    /// codec.encode(&data, &mut encoded).unwrap();
+    ///
+    /// let mut decoded = vec![0; 1000]; // allocated once, reused by every call
+    /// let n = codec.decode_into(&encoded, &mut decoded).unwrap();
+    /// assert_eq!(&decoded[..n], &data[..]);
+    /// ```
+    pub fn decode_into(&mut self, input: &[u32], out: &mut [T]) -> FastPForResult<usize> {
+        let (consumed, n_blocks) = if input.is_empty() {
+            (0, 0)
+        } else {
+            self.inner.block.decode_blocks_into(input, out)?
+        };
+        self.tail.clear();
+        self.inner
+            .tail
+            .decode(&input[consumed..], &mut self.tail, None)?;
+        let end = n_blocks + self.tail.len();
+        out.get_mut(n_blocks..end)
+            .ok_or(crate::FastPForError::OutputBufferTooSmall)?
+            .copy_from_slice(&self.tail);
+        Ok(end)
     }
 }
 

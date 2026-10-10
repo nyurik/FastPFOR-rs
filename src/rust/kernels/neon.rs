@@ -4,7 +4,7 @@ use bytemuck::cast;
 use wide::{i8x16, u32x4};
 
 use crate::FastPForResult;
-use crate::rust::integer_compression::fastpfor::FastPForBlock;
+use crate::rust::integer_compression::fastpfor::{FastPForBlock, Output};
 use crate::rust::integer_compression::fastpfor_int::FastPForInt;
 use crate::rust::kernels::lanes::{decode_page_lanes, encode_page_lanes};
 use crate::rust::kernels::lanes_wide::Wide;
@@ -82,11 +82,11 @@ impl private::PageCodec for Auto {
     }
 
     #[inline]
-    fn decode_sequential<L: Layout, T: FastPForInt, const N: usize>(
+    fn decode_sequential<L: Layout, T: FastPForInt, const N: usize, O: Output<T> + ?Sized>(
         codec: &mut FastPForBlock<L, T, N, Self>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()> {
@@ -119,15 +119,15 @@ impl private::PageCodec for Auto {
         );
     }
 
-    fn decode_interleaved<L: Layout, T: FastPForInt, const N: usize>(
+    fn decode_interleaved<L: Layout, T: FastPForInt, const N: usize, O: Output<T> + ?Sized>(
         codec: &mut FastPForBlock<L, T, N, Self>,
         input: &[u32],
         input_offset: &mut Cursor<u32>,
-        output: &mut Vec<T>,
+        output: &mut O,
         output_offset: &mut Cursor<u32>,
         this_size: u32,
     ) -> FastPForResult<()> {
-        decode_page_lanes::<L, T, N, Self, Wide>(
+        decode_page_lanes::<L, T, N, Self, Wide, O>(
             codec,
             input,
             input_offset,

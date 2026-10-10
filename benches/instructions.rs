@@ -26,8 +26,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, fmt, fs, thread};
 
 #[cfg(feature = "cpp")]
-use fastpfor::BlockCodec64;
-#[cfg(feature = "cpp")]
 use fastpfor::cpp::{CppFastPFor128, CppFastPFor256, CppSimdFastPFor128, CppSimdFastPFor256};
 use fastpfor::{AnyLenCodec, Auto, FastPForCodec, Interleaved, Portable, Sequential};
 use rand::rngs::StdRng;
@@ -46,40 +44,244 @@ const PERF_ACK_ENV: &str = "FASTPFOR_PERF_ACK";
 /// Optional CPU to pin `perf` runs to, for steadier cycle counts.
 const CPU_ENV: &str = "FASTPFOR_BENCH_CPU";
 
-/// A codec of either value width, as seen by the workload.
+/// A codec of either value width, as seen by the workload. Each one owns its output buffers and reuses
+/// them between calls, as a caller that encodes or decodes repeatedly would.
 trait Codec<T>: Default {
-    fn encode(&mut self, input: &[T], out: &mut Vec<u32>);
-    fn decode(&mut self, input: &[u32], out: &mut Vec<T>, len: usize);
+    fn encode(&mut self, input: &[T]) -> &[u32];
+    fn decode(&mut self, input: &[u32], len: usize) -> &[T];
 }
 
-/// Adapts an [`AnyLenCodec`]: every Rust codec, and the `u32` C++ codecs.
-#[derive(Default)]
-struct AnyLen<C>(C);
+/// Adapts an [`AnyLenCodec`]: the Rust codecs, through their public API.
+#[cfg(not(feature = "__bench"))]
+struct AnyLen<C: AnyLenCodec> {
+    codec: C,
+    words: Vec<u32>,
+    values: Vec<C::Elem>,
+}
 
+#[cfg(not(feature = "__bench"))]
+impl<C: AnyLenCodec> Default for AnyLen<C> {
+    fn default() -> Self {
+        Self {
+            codec: C::default(),
+            words: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+}
+
+#[cfg(not(feature = "__bench"))]
 impl<C: AnyLenCodec> Codec<C::Elem> for AnyLen<C> {
-    fn encode(&mut self, input: &[C::Elem], out: &mut Vec<u32>) {
-        self.0.encode(input, out).expect("encode failed");
+    fn encode(&mut self, input: &[C::Elem]) -> &[u32] {
+        self.words.clear();
+        self.codec
+            .encode(input, &mut self.words)
+            .expect("encode failed");
+        &self.words
     }
-    fn decode(&mut self, input: &[u32], out: &mut Vec<C::Elem>, len: usize) {
+    fn decode(&mut self, input: &[u32], len: usize) -> &[C::Elem] {
         let len = u32::try_from(len).expect("length fits in u32");
-        self.0.decode(input, out, Some(len)).expect("decode failed");
+        self.values.clear();
+        self.codec
+            .decode(input, &mut self.values, Some(len))
+            .expect("decode failed");
+        &self.values
     }
 }
 
-/// Adapts a C++ codec's 64-bit path.
-#[cfg(feature = "cpp")]
-#[derive(Default)]
-struct Wide<C>(C);
+/// `FastPForCodec::decode_into` of each Rust codec, which this benchmark cannot call generically.
+#[cfg(feature = "__bench")]
+trait DecodeInto<T> {
+    fn decode_slice(&mut self, input: &[u32], out: &mut [T]) -> usize;
+}
 
-#[cfg(feature = "cpp")]
-impl<C: BlockCodec64 + Default> Codec<u64> for Wide<C> {
-    fn encode(&mut self, input: &[u64], out: &mut Vec<u32>) {
-        self.0.encode64(input, out).expect("encode failed");
-    }
-    fn decode(&mut self, input: &[u32], out: &mut Vec<u64>, _len: usize) {
-        self.0.decode64(input, out).expect("decode failed");
+#[cfg(feature = "__bench")]
+macro_rules! decode_into {
+    ($($t:ident $n:literal),*) => {$(
+        decode_into!(@one Sequential $t $n Portable, Sequential $t $n Auto,
+                     Interleaved $t $n Portable, Interleaved $t $n Auto);
+    )*};
+    (@one $($layout:ident $t:ident $n:literal $k:ident),*) => {$(
+        impl DecodeInto<$t> for FastPForCodec<$layout, $t, $n, $k> {
+            fn decode_slice(&mut self, input: &[u32], out: &mut [$t]) -> usize {
+                self.decode_into(input, out).expect("decode failed")
+            }
+        }
+    )*};
+}
+
+#[cfg(feature = "__bench")]
+decode_into!(u32 128, u32 256, u64 128, u64 256);
+
+/// A Rust codec decoding with `decode_into` into a buffer sized once and reused: the same calling
+/// convention as the C++ library's, so neither side zero-fills its output on every call.
+#[cfg(feature = "__bench")]
+struct Slice<C: AnyLenCodec> {
+    codec: C,
+    words: Vec<u32>,
+    values: Vec<C::Elem>,
+}
+
+#[cfg(feature = "__bench")]
+impl<C: AnyLenCodec> Default for Slice<C> {
+    fn default() -> Self {
+        Self {
+            codec: C::default(),
+            words: Vec::new(),
+            values: Vec::new(),
+        }
     }
 }
+
+#[cfg(feature = "__bench")]
+impl<C: AnyLenCodec + DecodeInto<C::Elem>> Codec<C::Elem> for Slice<C>
+where
+    C::Elem: Workload,
+{
+    fn encode(&mut self, input: &[C::Elem]) -> &[u32] {
+        self.words.clear();
+        self.codec
+            .encode(input, &mut self.words)
+            .expect("encode failed");
+        &self.words
+    }
+    fn decode(&mut self, input: &[u32], len: usize) -> &[C::Elem] {
+        if self.values.len() < len {
+            self.values.resize(len, C::Elem::default());
+        }
+        let n = self.codec.decode_slice(input, &mut self.values);
+        &self.values[..n]
+    }
+}
+
+/// How the Rust codecs are called: with `__bench` through `decode_into`, as the C++ ones are called;
+/// otherwise (e.g. on a base commit that predates it) through `AnyLenCodec::decode`.
+#[cfg(feature = "__bench")]
+type RustCodec<C> = Slice<C>;
+#[cfg(not(feature = "__bench"))]
+type RustCodec<C> = AnyLen<C>;
+
+/// The C++ library's own calling convention: the caller provides output arrays, here sized once and
+/// reused. The crate's `AnyLenCodec` wrappers would instead zero-fill an oversized output vector on
+/// every call, which is not part of the C++ library and would count against it.
+#[cfg(feature = "__bench")]
+trait RawCpp<T>: Default {
+    fn encode_raw(&mut self, input: &[T], out: &mut [u32]) -> usize;
+    fn decode_raw(&mut self, input: &[u32], out: &mut [T]) -> usize;
+}
+
+#[cfg(feature = "__bench")]
+macro_rules! raw_cpp {
+    ($($codec:ty: $t:ty => $encode:ident, $decode:ident;)*) => {$(
+        impl RawCpp<$t> for $codec {
+            fn encode_raw(&mut self, input: &[$t], out: &mut [u32]) -> usize {
+                self.$encode(input, out).expect("encode failed")
+            }
+            fn decode_raw(&mut self, input: &[u32], out: &mut [$t]) -> usize {
+                self.$decode(input, out).expect("decode failed")
+            }
+        }
+    )*};
+}
+
+#[cfg(feature = "__bench")]
+raw_cpp! {
+    CppFastPFor128: u32 => encode_to_slice, decode_to_slice;
+    CppFastPFor256: u32 => encode_to_slice, decode_to_slice;
+    CppFastPFor128: u64 => encode64_to_slice, decode64_to_slice;
+    CppFastPFor256: u64 => encode64_to_slice, decode64_to_slice;
+    CppSimdFastPFor128: u32 => encode_to_slice, decode_to_slice;
+    CppSimdFastPFor256: u32 => encode_to_slice, decode_to_slice;
+}
+
+/// Adapts a C++ codec through [`RawCpp`].
+#[cfg(feature = "__bench")]
+struct Cpp<C, T> {
+    codec: C,
+    words: Vec<u32>,
+    values: Vec<T>,
+}
+
+#[cfg(feature = "__bench")]
+impl<C: Default, T> Default for Cpp<C, T> {
+    fn default() -> Self {
+        Self {
+            codec: C::default(),
+            words: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "__bench")]
+impl<C: RawCpp<T>, T: Workload> Codec<T> for Cpp<C, T> {
+    fn encode(&mut self, input: &[T]) -> &[u32] {
+        // The same room as the crate's wrappers give the C++ encoder.
+        let room = input.len() * (size_of::<T>() / 4 + 1) + 1024;
+        if self.words.len() < room {
+            self.words.resize(room, 0);
+        }
+        let n = self.codec.encode_raw(input, &mut self.words);
+        &self.words[..n]
+    }
+    fn decode(&mut self, input: &[u32], len: usize) -> &[T] {
+        // Some C++ codecs write a few values past the end; see `decode32_anylen_ffi`.
+        if self.values.len() < len + 32 {
+            self.values.resize(len + 32, T::default());
+        }
+        let n = self.codec.decode_raw(input, &mut self.values);
+        assert_eq!(n, len, "decoded count");
+        &self.values[..n]
+    }
+}
+
+/// Without `__bench` (e.g. when counting a base commit that predates it), the C++ codecs go through the
+/// crate's wrappers instead: `u32` through [`AnyLen`], `u64` through this.
+#[cfg(all(feature = "cpp", not(feature = "__bench")))]
+struct Wide<C> {
+    codec: C,
+    words: Vec<u32>,
+    values: Vec<u64>,
+}
+
+#[cfg(all(feature = "cpp", not(feature = "__bench")))]
+impl<C: Default> Default for Wide<C> {
+    fn default() -> Self {
+        Self {
+            codec: C::default(),
+            words: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+}
+
+#[cfg(all(feature = "cpp", not(feature = "__bench")))]
+impl<C: fastpfor::BlockCodec64 + Default> Codec<u64> for Wide<C> {
+    fn encode(&mut self, input: &[u64]) -> &[u32] {
+        self.words.clear();
+        self.codec
+            .encode64(input, &mut self.words)
+            .expect("encode failed");
+        &self.words
+    }
+    fn decode(&mut self, input: &[u32], _len: usize) -> &[u64] {
+        self.values.clear();
+        self.codec
+            .decode64(input, &mut self.values)
+            .expect("decode failed");
+        &self.values
+    }
+}
+
+/// The adapters of the C++ codecs.
+#[cfg(feature = "__bench")]
+type CppU32<C> = Cpp<C, u32>;
+#[cfg(feature = "__bench")]
+type CppU64<C> = Cpp<C, u64>;
+#[cfg(all(feature = "cpp", not(feature = "__bench")))]
+type CppU32<C> = AnyLen<C>;
+#[cfg(all(feature = "cpp", not(feature = "__bench")))]
+type CppU64<C> = Wide<C>;
 
 /// The values of one workload: a mix of the patterns the criterion benchmarks use.
 trait Workload: Copy + PartialEq + fmt::Debug + Default {
@@ -195,34 +397,33 @@ fn run<T: Workload, C: Codec<T>>(op: Op, repeats: usize) {
     let perf = PerfControl::from_env();
     let perf = perf.as_ref();
     let mut codec = C::default();
-    let mut encoded = Vec::new();
-    codec.encode(&data, &mut encoded);
-    let mut decoded = Vec::new();
+    let encoded = codec.encode(&data).to_vec();
     match op {
         Op::Encode => {
             measured(
                 &mut || {
-                    encoded.clear();
-                    codec.encode(black_box(&data), &mut encoded);
+                    black_box(codec.encode(black_box(&data)));
                 },
                 repeats,
                 perf,
             );
         }
         Op::Decode => {
-            codec.decode(&encoded, &mut decoded, data.len());
+            codec.decode(&encoded, data.len());
             measured(
                 &mut || {
-                    decoded.clear();
-                    codec.decode(black_box(&encoded), &mut decoded, data.len());
+                    black_box(codec.decode(black_box(&encoded), data.len()));
                 },
                 repeats,
                 perf,
             );
-            assert_eq!(decoded, data, "roundtrip mismatch");
+            assert_eq!(
+                codec.decode(&encoded, data.len()),
+                data,
+                "roundtrip mismatch"
+            );
         }
     }
-    black_box((encoded, decoded));
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -269,14 +470,14 @@ macro_rules! rust_cases {
                 width: $t::BITS,
                 block: $n,
                 implementation: IMPLS[0],
-                run: run::<$t, AnyLen<FastPForCodec<$layout, $t, $n, Portable>>>,
+                run: run::<$t, RustCodec<FastPForCodec<$layout, $t, $n, Portable>>>,
             },
             Case {
                 layout: stringify!($layout),
                 width: $t::BITS,
                 block: $n,
                 implementation: IMPLS[1],
-                run: run::<$t, AnyLen<FastPForCodec<$layout, $t, $n, Auto>>>,
+                run: run::<$t, RustCodec<FastPForCodec<$layout, $t, $n, Auto>>>,
             },
         )*]
     };
@@ -307,21 +508,21 @@ fn cases() -> Vec<Case> {
             run,
         };
         cases.extend([
-            cpp("Sequential", 32, 128, run::<u32, AnyLen<CppFastPFor128>>),
-            cpp("Sequential", 32, 256, run::<u32, AnyLen<CppFastPFor256>>),
-            cpp("Sequential", 64, 128, run::<u64, Wide<CppFastPFor128>>),
-            cpp("Sequential", 64, 256, run::<u64, Wide<CppFastPFor256>>),
+            cpp("Sequential", 32, 128, run::<u32, CppU32<CppFastPFor128>>),
+            cpp("Sequential", 32, 256, run::<u32, CppU32<CppFastPFor256>>),
+            cpp("Sequential", 64, 128, run::<u64, CppU64<CppFastPFor128>>),
+            cpp("Sequential", 64, 256, run::<u64, CppU64<CppFastPFor256>>),
             cpp(
                 "Interleaved",
                 32,
                 128,
-                run::<u32, AnyLen<CppSimdFastPFor128>>,
+                run::<u32, CppU32<CppSimdFastPFor128>>,
             ),
             cpp(
                 "Interleaved",
                 32,
                 256,
-                run::<u32, AnyLen<CppSimdFastPFor256>>,
+                run::<u32, CppU32<CppSimdFastPFor256>>,
             ),
         ]);
     }
@@ -402,7 +603,7 @@ fn callgrind(exe: &Path, dir: &Path, case: &Case, op: Op) -> Vec<Option<u64>> {
 /// Runs one case under `perf stat` and returns the user-space instructions and cycles counted
 /// while `measured` had the counters enabled, for [`PERF_REPEATS`] calls.
 ///
-/// C++ codecs are counted with the Rust FFI wrapper, which zero-fills its output buffers.
+/// C++ codecs are counted as called from their output buffers (see [`RawCpp`]), so with `__bench`.
 fn perf(exe: &Path, dir: &Path, case: &Case, op: Op) -> Vec<Option<u64>> {
     let name = format!("{}-{}", case.id(), op.name());
     let (ctl, ack, out_file) = (
@@ -669,8 +870,9 @@ fn print_notes(tool: Tool, has_baseline: bool) {
             "Rust: the whole `AnyLenCodec` call. C++: the C++ library call only, without the Rust FFI wrapper."
         ),
         Tool::Perf => println!(
-            "User-space hardware counts, averaged over {PERF_REPEATS} calls. \
-             Rust: the whole `AnyLenCodec` call. C++: the call including the Rust FFI wrapper."
+            "User-space hardware counts, averaged over {PERF_REPEATS} calls. With `__bench`, both decode into \
+             output buffers sized once and reused (Rust: `decode_into`; C++: its library call). Without it, Rust \
+             uses `AnyLenCodec::decode` and C++ the crate's wrappers, which zero-fill their output on every call."
         ),
     }
     println!(

@@ -8,6 +8,63 @@ use crate::rust::integer_compression::fastpfor_int::FastPForInt;
 use crate::rust::kernels::{Kernels, Layout};
 use crate::{BlockCodec, FastPForError, FastPForResult};
 
+impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> FastPForBlock<L, T, N, K>
+where
+    [T; N]: sealed::BlockSize,
+{
+    /// Splits off and checks the stream's value count: a whole number of blocks, at most what `input`
+    /// can hold, and `expected_len` if given.
+    fn block_header(input: &[u32], expected_len: Option<u32>) -> FastPForResult<(u32, &[u32])> {
+        let Some((&block_n_values, rest)) = input.split_first() else {
+            return Err(FastPForError::NotEnoughData);
+        };
+        if block_n_values % N as u32 != 0 {
+            return Err(FastPForError::NotEnoughData);
+        }
+        let max = Self::max_decompressed_len(input.len());
+        if let Some(expected) = expected_len {
+            expected.is_valid_expected(max)?;
+            if block_n_values != expected {
+                return Err(FastPForError::DecodedCountMismatch {
+                    actual: block_n_values.as_usize(),
+                    expected: expected.as_usize(),
+                });
+            }
+        } else if block_n_values.as_usize() > max {
+            return Err(FastPForError::NotEnoughData);
+        }
+        Ok((block_n_values, rest))
+    }
+
+    /// Like [`decode_blocks`](BlockCodec::decode_blocks), but into the start of `out`, which must hold
+    /// every value. Returns the words consumed from `input` and the values written.
+    pub(crate) fn decode_blocks_into(
+        &mut self,
+        input: &[u32],
+        out: &mut [T],
+    ) -> FastPForResult<(usize, usize)> {
+        let (block_n_values, rest) = Self::block_header(input, None)?;
+        let n_values = block_n_values as usize;
+        if n_values > out.len() {
+            return Err(FastPForError::OutputBufferTooSmall);
+        }
+        if n_values == 0 {
+            return Ok((1, 0));
+        }
+        let mut in_off = Cursor::new(0u32);
+        let mut out_off = Cursor::new(0u32);
+        self.decode_headless_blocks(
+            rest,
+            block_n_values,
+            &mut in_off,
+            &mut out[..n_values],
+            &mut out_off,
+        )?;
+        // +1 for the header word (block_n_values) that precedes `rest`.
+        Ok((1 + in_off.position() as usize, n_values))
+    }
+}
+
 impl<L: Layout, T: FastPForInt, const N: usize, K: Kernels> BlockCodec for FastPForBlock<L, T, N, K>
 where
     [T; N]: sealed::BlockSize,
@@ -42,24 +99,7 @@ where
         expected_len: Option<u32>,
         out: &mut Vec<Self::Elem>,
     ) -> FastPForResult<usize> {
-        let Some((&block_n_values, rest)) = input.split_first() else {
-            return Err(FastPForError::NotEnoughData);
-        };
-        if block_n_values % N as u32 != 0 {
-            return Err(FastPForError::NotEnoughData);
-        }
-        let max = Self::max_decompressed_len(input.len());
-        if let Some(expected) = expected_len {
-            expected.is_valid_expected(max)?;
-            if block_n_values != expected {
-                return Err(FastPForError::DecodedCountMismatch {
-                    actual: block_n_values.as_usize(),
-                    expected: expected.as_usize(),
-                });
-            }
-        } else if block_n_values.as_usize() > max {
-            return Err(FastPForError::NotEnoughData);
-        }
+        let (block_n_values, rest) = Self::block_header(input, expected_len)?;
         let n_blocks = block_n_values as usize / N;
         if n_blocks == 0 {
             return Ok(1);

@@ -42,8 +42,8 @@ use crate::helpers::AsUsize;
 /// ```
 #[derive(Debug)]
 pub struct CompositeCodec<Blocks: BlockCodec, Tail: AnyLenCodec<Elem = Blocks::Elem>> {
-    block: Blocks,
-    tail: Tail,
+    pub(crate) block: Blocks,
+    pub(crate) tail: Tail,
 }
 
 impl<Blocks: BlockCodec, Tail: AnyLenCodec<Elem = Blocks::Elem>> Default

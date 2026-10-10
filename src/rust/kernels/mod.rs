@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::io::Cursor;
 
 use crate::FastPForResult;
-use crate::rust::integer_compression::fastpfor::FastPForBlock;
+use crate::rust::integer_compression::fastpfor::{FastPForBlock, Output};
 use crate::rust::integer_compression::fastpfor_int::FastPForInt;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -125,7 +125,7 @@ pub fn implementation<L: Layout, K: Kernels>() -> Implementation {
 pub(crate) mod private {
     use super::portable::{decode_page_scalar, encode_page_scalar};
     use super::{
-        Cursor, FastPForBlock, FastPForInt, FastPForResult, Interleaved, Kernels, Layout,
+        Cursor, FastPForBlock, FastPForInt, FastPForResult, Interleaved, Kernels, Layout, Output,
         Sequential, lanes,
     };
 
@@ -156,11 +156,11 @@ pub(crate) mod private {
             encode_page_scalar(codec, input, this_size, input_offset, output, output_offset);
         }
 
-        fn decode_sequential<L: Layout, T: FastPForInt, const N: usize>(
+        fn decode_sequential<L: Layout, T: FastPForInt, const N: usize, O: Output<T> + ?Sized>(
             codec: &mut FastPForBlock<L, T, N, Self>,
             input: &[u32],
             input_offset: &mut Cursor<u32>,
-            output: &mut Vec<T>,
+            output: &mut O,
             output_offset: &mut Cursor<u32>,
             this_size: u32,
         ) -> FastPForResult<()>
@@ -190,18 +190,18 @@ pub(crate) mod private {
             );
         }
 
-        fn decode_interleaved<L: Layout, T: FastPForInt, const N: usize>(
+        fn decode_interleaved<L: Layout, T: FastPForInt, const N: usize, O: Output<T> + ?Sized>(
             codec: &mut FastPForBlock<L, T, N, Self>,
             input: &[u32],
             input_offset: &mut Cursor<u32>,
-            output: &mut Vec<T>,
+            output: &mut O,
             output_offset: &mut Cursor<u32>,
             this_size: u32,
         ) -> FastPForResult<()>
         where
             Self: Kernels,
         {
-            lanes::decode_page_lanes::<L, T, N, Self, lanes::Arrays>(
+            lanes::decode_page_lanes::<L, T, N, Self, lanes::Arrays, O>(
                 codec,
                 input,
                 input_offset,
@@ -228,11 +228,11 @@ pub(crate) mod private {
         ) where
             Self: Layout;
 
-        fn decode_page<T: FastPForInt, const N: usize, K: Kernels>(
+        fn decode_page<T: FastPForInt, const N: usize, K: Kernels, O: Output<T> + ?Sized>(
             codec: &mut FastPForBlock<Self, T, N, K>,
             input: &[u32],
             input_offset: &mut Cursor<u32>,
-            output: &mut Vec<T>,
+            output: &mut O,
             output_offset: &mut Cursor<u32>,
             this_size: u32,
         ) -> FastPForResult<()>
@@ -257,11 +257,11 @@ pub(crate) mod private {
             K::encode_sequential(codec, input, this_size, input_offset, output, output_offset);
         }
 
-        fn decode_page<T: FastPForInt, const N: usize, K: Kernels>(
+        fn decode_page<T: FastPForInt, const N: usize, K: Kernels, O: Output<T> + ?Sized>(
             codec: &mut FastPForBlock<Self, T, N, K>,
             input: &[u32],
             input_offset: &mut Cursor<u32>,
-            output: &mut Vec<T>,
+            output: &mut O,
             output_offset: &mut Cursor<u32>,
             this_size: u32,
         ) -> FastPForResult<()> {
@@ -286,11 +286,11 @@ pub(crate) mod private {
             K::encode_interleaved(codec, input, this_size, input_offset, output, output_offset);
         }
 
-        fn decode_page<T: FastPForInt, const N: usize, K: Kernels>(
+        fn decode_page<T: FastPForInt, const N: usize, K: Kernels, O: Output<T> + ?Sized>(
             codec: &mut FastPForBlock<Self, T, N, K>,
             input: &[u32],
             input_offset: &mut Cursor<u32>,
-            output: &mut Vec<T>,
+            output: &mut O,
             output_offset: &mut Cursor<u32>,
             this_size: u32,
         ) -> FastPForResult<()> {

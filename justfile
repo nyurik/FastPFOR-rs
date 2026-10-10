@@ -33,7 +33,7 @@ build:
 
 # Quick compile without building a binary
 check:
-    cargo check --workspace --all-targets --features _all_compatible,__testing
+    cargo check --workspace --all-targets --features _all_compatible,__testing,__bench
     cargo check --workspace --all-targets --no-default-features --features cpp
     cargo check --workspace --all-targets --no-default-features --features rust
     cargo check --workspace --all-targets --manifest-path fuzz/Cargo.toml
@@ -95,7 +95,7 @@ clean:
 
 # Run cargo clippy to lint the code
 clippy *args:
-    cargo clippy --workspace --all-targets --features _all_compatible,__testing {{args}}
+    cargo clippy --workspace --all-targets --features _all_compatible,__testing,__bench {{args}}
     cargo clippy --workspace --all-targets --manifest-path fuzz/Cargo.toml {{args}}
 
 # Generate and open the HTML coverage report
@@ -178,7 +178,7 @@ semver *args:  (cargo-install 'cargo-semver-checks')
 
 # Run all tests
 test:
-    cargo test --workspace --all-targets --features _all_compatible,__testing
+    cargo test --workspace --all-targets --features _all_compatible,__testing,__bench
     cargo test --doc --workspace --features _all_compatible,__testing
 
 # Test with a specific SIMD mode (portable, native)

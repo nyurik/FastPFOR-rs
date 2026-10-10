@@ -40,6 +40,8 @@ rust = ["dep:num-traits"]
 # portable code, and with `cpp` also off this crate contains no `unsafe` code (enforced by `forbid(unsafe_code)`).
 simd = ["rust", "dep:wide"]
 __testing = ["rust"]
+# Raw C++ codec calls for the `instructions` benchmark. Unlike `__testing`, it changes no Rust code.
+__bench = ["cpp"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["min_const_generics"] }

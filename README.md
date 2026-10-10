@@ -30,14 +30,15 @@ compatibility and speed:
 | C++ equivalent              | `FastPFor`, `u32` and `u64`                              | `SIMDFastPFor`, `u32` only                                |
 | SIMD on `x86_64`            | AVX2, detected at runtime; portable on older CPUs        | SSE2: every `x86_64` CPU, no detection                    |
 | SIMD on `aarch64`           | NEON, little-endian (`u64` wider than 32 bits: portable) | NEON, little-endian                                       |
-| `u32` decode (cycles/value) | 1.21-1.29                                                | **0.92-1.02**                                             |
-| `u64` decode (cycles/value) | 2.45-2.49                                                | **1.86-1.91**                                             |
-| `u32` encode (cycles/value) | 5.07-5.43                                                | **4.44-5.02**                                             |
-| `u64` encode (cycles/value) | 6.30-7.38                                                | **5.86-6.50**                                             |
+| `u32` decode (cycles/value) | 0.89                                                     | **0.70-0.75**                                             |
+| `u64` decode (cycles/value) | 1.73-1.90                                                | **1.27-1.29**                                             |
+| `u32` encode (cycles/value) | 4.60-5.19                                                | **4.23-4.80**                                             |
+| `u64` encode (cycles/value) | 6.38-7.25                                                | **5.34-6.38**                                             |
 | Code size (`u64`)           | smaller                                                  | about 140 KB more: unrolled kernels for each of 64 widths |
 
-The speeds are CPU cycles per value for 128- and 256-value blocks with the default `Auto` kernels, from one machine
-(see [Benchmarks](#benchmarks), which also compares them with the C++ library), so treat them only as relative data points.
+The speeds are CPU cycles per value for 128- and 256-value blocks with the default `Auto` kernels, decoding with
+`decode_into`, from one machine (see [Benchmarks](#benchmarks), which also compares them with the C++ library), so
+treat them only as relative data points.
 
 The Rust `FastPFor` codecs, scalar **and** `Simd`, write byte-identical streams, and those streams are identical to
 the **non-SIMD** C++ `FastPFor` codec (`CppFastPFor128` / `CppFastPFor256`) for both `u32` and `u64`.
@@ -99,6 +100,22 @@ let mut decoded = Vec::new();
 codec.decode(&encoded, &mut decoded, None).unwrap();
 
 assert_eq!(decoded, input);
+```
+
+To decode repeatedly, `decode_into` writes into a slice you allocate once and reuse, instead of appending to a `Vec`
+(which must be zero-filled first, on every call). It returns how many values it wrote, and fails if they don't fit:
+
+```rust
+use fastpfor::{AnyLenCodec, FastPForSequential32x256};
+
+let mut codec = FastPForSequential32x256::default();
+let input: Vec<u32> = (0..1000).collect();
+let mut encoded = Vec::new();
+codec.encode(&input, &mut encoded).unwrap();
+
+let mut decoded = vec![0; 1000];
+let n = codec.decode_into(&encoded, &mut decoded).unwrap();
+assert_eq!(&decoded[..n], &input[..]);
 ```
 
 `u64` values work the same way. Those codecs also implement `BlockCodec64` (`encode64` / `decode64`),
@@ -291,33 +308,50 @@ Rust (the default `Auto` kernels) against the original C++ library, in CPU cycle
   <img alt="Encoding: CPU cycles per value of Rust and C++ for each format, value type and block size" src="benches/charts/encode-light.svg">
 </picture>
 
-Rust is faster in every configuration that C++ supports: it encodes in 1.3-1.5× fewer cycles, and decodes the
-sequential format in 1.3-1.5× fewer cycles and the interleaved format in 1.1-1.2× fewer. C++ has no 64-bit
-`SIMDFastPFor`, so interleaved `u64` has no C++ counterpart.
+Rust encodes faster in every configuration, in 1.2-1.5× fewer cycles. It also decodes the sequential format faster:
+1.5× for `u32` (its AVX2 kernels against the C++ library's scalar ones) and 1.1-1.2× for `u64`. The interleaved
+format, where both use SIMD kernels, decodes about as fast in both (0.95-1.04×). C++ has no 64-bit `SIMDFastPFor`,
+so interleaved `u64` has no C++ counterpart.
 
 | Format      | Type  | Block | Encode: Rust |  C++ | Rust speedup | Decode: Rust |  C++ | Rust speedup |
 |-------------|-------|-------|-------------:|-----:|-------------:|-------------:|-----:|-------------:|
-| Sequential  | `u32` | 128   |         5.43 | 8.13 |        1.50× |         1.21 | 1.85 |        1.53× |
-| Sequential  | `u32` | 256   |         5.07 | 7.74 |        1.53× |         1.29 | 1.63 |        1.26× |
-| Sequential  | `u64` | 128   |         7.38 | 9.33 |        1.26× |         2.49 | 3.76 |        1.51× |
-| Sequential  | `u64` | 256   |         6.30 | 8.56 |        1.36× |         2.45 | 3.69 |        1.51× |
-| Interleaved | `u32` | 128   |         5.02 | 7.19 |        1.43× |         1.02 | 1.09 |        1.06× |
-| Interleaved | `u32` | 256   |         4.44 | 6.85 |        1.54× |         0.92 | 1.05 |        1.15× |
-| Interleaved | `u64` | 128   |         6.50 |  n/a |          n/a |         1.91 |  n/a |          n/a |
-| Interleaved | `u64` | 256   |         5.86 |  n/a |          n/a |         1.86 |  n/a |          n/a |
+| Sequential  | `u32` | 128   |         5.19 | 7.64 |        1.47× |         0.89 | 1.34 |        1.51× |
+| Sequential  | `u32` | 256   |         4.60 | 6.91 |        1.50× |         0.89 | 1.31 |        1.48× |
+| Sequential  | `u64` | 128   |         7.25 | 8.51 |        1.17× |         1.90 | 2.05 |        1.08× |
+| Sequential  | `u64` | 256   |         6.38 | 7.56 |        1.19× |         1.73 | 2.02 |        1.17× |
+| Interleaved | `u32` | 128   |         4.80 | 6.59 |        1.37× |         0.75 | 0.71 |        0.95× |
+| Interleaved | `u32` | 256   |         4.23 | 6.02 |        1.42× |         0.70 | 0.73 |        1.04× |
+| Interleaved | `u64` | 128   |         6.38 |  n/a |          n/a |         1.29 |  n/a |          n/a |
+| Interleaved | `u64` | 256   |         5.34 |  n/a |          n/a |         1.27 |  n/a |          n/a |
 
-"Rust speedup" is C++ cycles divided by Rust cycles.
+"Rust speedup" is C++ cycles divided by Rust cycles; below 1 means C++ is faster.
+
+**What is compared:** the same data and work on both sides: the sequential streams are byte-identical between Rust and
+C++ (the tests check this), and the interleaved ones use the same format. A few differences remain, and are part of
+what each library does rather than of the benchmark:
+
+* **Both decode into an output buffer allocated once and reused**, which is how the C++ library is called. In Rust that
+  is `FastPForCodec::decode_into`. `AnyLenCodec::decode` instead appends to a `Vec`, which safe Rust must zero-fill
+  before writing into it, on every call: it decodes 20-33% slower than `decode_into` in this benchmark.
+* **Rust validates its input.** It checks every offset, count, and exception position of the stream and returns an
+  error for corrupted data. The C++ library trusts its input.
+* **The sequential format has no SIMD kernels in C++.** Rust's `Auto` kernels use AVX2 for it; the `Portable` ones
+  are the scalar counterpart.
+* **The C++ library frees its scratch buffers after every call** and allocates them again in the next one; the Rust
+  codec keeps its buffers between calls.
 
 **How this was measured:** three runs of `just bench perf` (hardware counters through `perf stat`, pinned to one core)
-on an Intel i9-10885H laptop, with the C++ library built with `-march=native` and called through the `cpp` feature's
-wrappers. Each run encodes and decodes 131,172 values (two 65,536-value pages plus a partial block), a mix of small,
-clustered, ascending, sparse (many exceptions), and large values; for `u64`, also values wider than 32 bits.
-The charts show the median run, with whiskers from the fastest to the slowest one: a single run can be a third
-slower than the median on this machine, so compare medians, not single runs.
+on an Intel i9-10885H laptop. Both languages are built for that CPU: C++ with `-march=native`, Rust with
+`-C target-cpu=native`. Each side decodes into an output buffer sized once and reused (`decode_into` for Rust); the
+C++ codecs are called directly, not through the crate's `cpp` wrappers, whose zero-filling of an oversized output
+vector on every call would count against C++. Each run
+encodes and decodes 131,172 values (two 65,536-value pages plus a partial block), a mix of small, clustered, ascending,
+sparse (many exceptions), and large values; for `u64`, also values wider than 32 bits. The charts show the median run,
+with whiskers from the fastest to the slowest one; single runs were within 26% of the median.
 
 * `just bench perf [mode] [cpu]` counts cycles and instructions with the CPU's hardware counters. It needs
-  `kernel.perf_event_paranoid` of 2 or lower, and explains how to set it if not. `mode` is how the C++ library is
-  built (`native` or `portable`). With `--save <file>` it keeps the raw counts, and
+  `kernel.perf_event_paranoid` of 2 or lower, and explains how to set it if not. `mode` is how both languages are
+  built: `native` for this CPU, or `portable`. With `--save <file>` it keeps the raw counts, and
   `benches/charts/render.py <files>` redraws the charts from them.
 * `just bench instructions [mode]` counts instructions with valgrind instead: slower, but exact, and needs no kernel
   setting. Both accept `--filter <case>`, e.g. `--filter Interleaved-u32-128`.

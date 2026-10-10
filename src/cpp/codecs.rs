@@ -28,6 +28,22 @@ macro_rules! implement_cpp_codecs {
                 pub fn new() -> Self {
                     Self(ffi::$ffi())
                 }
+
+                /// Encodes straight into `out`, which must be large enough, and returns the words written.
+                /// For the `instructions` benchmark: unlike [`AnyLenCodec::encode`], no output vector is zero-filled first.
+                #[cfg(feature = "__bench")]
+                #[doc(hidden)]
+                pub fn encode_to_slice(&mut self, input: &[u32], out: &mut [u32]) -> FastPForResult<usize> {
+                    Ok(ffi::codec_encode32(&self.0, input, out)?)
+                }
+
+                /// Decodes straight into `out`, which must be large enough, and returns the values written.
+                /// For the `instructions` benchmark: unlike [`AnyLenCodec::decode`], no output vector is zero-filled first.
+                #[cfg(feature = "__bench")]
+                #[doc(hidden)]
+                pub fn decode_to_slice(&mut self, input: &[u32], out: &mut [u32]) -> FastPForResult<usize> {
+                    Ok(ffi::codec_decode32(&self.0, input, out)?)
+                }
             }
 
             impl Default for $name {
@@ -202,6 +218,22 @@ macro_rules! implement_cpp_codecs_64 {
                 }
                 fn decode64(&mut self, input: &[u32], out: &mut Vec<u64>) -> FastPForResult<()> {
                     decode64_to_vec_ffi(&self.0, input, out)
+                }
+            }
+
+            impl $name {
+                /// The 64-bit [`encode_to_slice`](Self::encode_to_slice).
+                #[cfg(feature = "__bench")]
+                #[doc(hidden)]
+                pub fn encode64_to_slice(&mut self, input: &[u64], out: &mut [u32]) -> FastPForResult<usize> {
+                    Ok(ffi::codec_encode64(&self.0, input, out)?)
+                }
+
+                /// The 64-bit [`decode_to_slice`](Self::decode_to_slice).
+                #[cfg(feature = "__bench")]
+                #[doc(hidden)]
+                pub fn decode64_to_slice(&mut self, input: &[u32], out: &mut [u64]) -> FastPForResult<usize> {
+                    Ok(ffi::codec_decode64(&self.0, input, out)?)
                 }
             }
         )*

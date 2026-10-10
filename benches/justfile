@@ -3,6 +3,10 @@
 # How to call the current just executable. Note that just_executable() may have `\` in Windows paths, so we need to quote it.
 just := quote(just_executable())
 
+# In `native` mode the Rust code is built for this CPU too (`-C target-cpu=native`), as the C++ library is,
+# so both use the same CPU features.
+rustflags := env('RUSTFLAGS', '')
+
 # Run all benchmarks (Rust only)
 all:
     cargo bench --bench fastpfor_benchmark --no-default-features --features rust
@@ -56,12 +60,12 @@ kernels *args:
 # Extra args: `--save <file>` keeps the raw counts, `--baseline <file>` compares with saved ones.
 # Count CPU instructions per value (valgrind/callgrind) of every FastPFor implementation
 instructions mode='native' *args:
-    cargo bench --bench instructions --features rust,simd,cpp_{{mode}} -- {{args}}
+    {{ if mode == "native" { "RUSTFLAGS='" + rustflags + " -C target-cpu=native'" } else { "" } }} cargo bench --bench instructions --features rust,simd,__bench,cpp_{{mode}} -- {{args}}
 
 # Needs `kernel.perf_event_paranoid <= 2`; set `cpu=''` to not pin the runs to one CPU.
 # Like `instructions`, but counts instructions and cycles with the CPU's hardware counters (`perf stat`)
 perf mode='native' cpu='2' *args: perf-check
-    FASTPFOR_BENCH_CPU='{{cpu}}' cargo bench --bench instructions --features rust,simd,cpp_{{mode}} -- --perf {{args}}
+    {{ if mode == "native" { "RUSTFLAGS='" + rustflags + " -C target-cpu=native'" } else { "" } }} FASTPFOR_BENCH_CPU='{{cpu}}' cargo bench --bench instructions --features rust,simd,__bench,cpp_{{mode}} -- --perf {{args}}
 
 # Check that `perf` can read the CPU's instruction and cycle counters, and explain how to allow it if not
 perf-check:
@@ -119,6 +123,7 @@ ci output='target/bench/summary.md' base_ref='':
         fi
         features="rust,cpp_portable"
         if grep -q '^simd = ' "$base_src/Cargo.toml"; then features="$features,simd"; fi
+        if grep -q '^__bench = ' "$base_src/Cargo.toml"; then features="$features,__bench"; fi
         base_bench() {
             (cd "$base_src" && cargo bench --bench instructions --features "$features" -- "$@") > /dev/null 2>> "$out_dir/base.log"
         }
